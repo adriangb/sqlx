@@ -12,8 +12,9 @@ use futures_core::future::BoxFuture;
 use futures_intrusive::sync::MutexGuard;
 use futures_util::future;
 use libsqlite3_sys::{
-    sqlite3, sqlite3_commit_hook, sqlite3_get_autocommit, sqlite3_progress_handler,
-    sqlite3_rollback_hook, sqlite3_update_hook, SQLITE_DELETE, SQLITE_INSERT, SQLITE_UPDATE,
+    sqlite3, sqlite3_commit_hook, sqlite3_db_status, sqlite3_get_autocommit, sqlite3_memory_highwater,
+    sqlite3_memory_used, sqlite3_progress_handler, sqlite3_rollback_hook, sqlite3_soft_heap_limit64,
+    sqlite3_update_hook, SQLITE_DELETE, SQLITE_INSERT, SQLITE_UPDATE, SQLITE_OK,
 };
 #[cfg(feature = "preupdate-hook")]
 pub use preupdate_hook::*;
@@ -556,6 +557,76 @@ impl LockedSqliteHandle<'_> {
     pub(crate) fn in_transaction(&mut self) -> bool {
         let ret = unsafe { sqlite3_get_autocommit(self.as_raw_handle().as_ptr()) };
         ret == 0
+    }
+
+    /// Returns database status information for various subsystems.
+    ///
+    /// This method provides access to SQLite's `sqlite3_db_status()` function,
+    /// which returns statistics about the database connection.
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - One of the SQLITE_DBSTATUS constants (e.g., SQLITE_DBSTATUS_CACHE_USED)
+    /// * `reset_flag` - If true, reset the highwater mark after reading it
+    ///
+    /// # Returns
+    ///
+    /// A tuple of (current_value, highwater_mark)
+    pub fn db_status(&mut self, op: i32, reset_flag: bool) -> Result<(i32, i32), crate::Error> {
+        let mut current = 0i32;
+        let mut highwater = 0i32;
+        
+        let result = unsafe {
+            sqlite3_db_status(
+                self.as_raw_handle().as_ptr(),
+                op,
+                &mut current,
+                &mut highwater,
+                if reset_flag { 1 } else { 0 },
+            )
+        };
+
+        if result == SQLITE_OK {
+            Ok((current, highwater))
+        } else {
+            Err(crate::Error::Database(Box::new(
+                self.guard.handle.expect_error(),
+            )))
+        }
+    }
+
+    /// Returns the current amount of memory being used by SQLite.
+    ///
+    /// This is equivalent to calling `sqlite3_memory_used()`.
+    pub fn memory_used(&self) -> i64 {
+        unsafe { sqlite3_memory_used() }
+    }
+
+    /// Returns the high-water mark for SQLite memory usage.
+    ///
+    /// This is equivalent to calling `sqlite3_memory_highwater()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `reset_flag` - If true, reset the high-water mark after reading it
+    pub fn memory_highwater(&self, reset_flag: bool) -> i64 {
+        unsafe { sqlite3_memory_highwater(if reset_flag { 1 } else { 0 }) }
+    }
+
+    /// Sets or queries the soft heap limit.
+    ///
+    /// This is equivalent to calling `sqlite3_soft_heap_limit64()`.
+    /// 
+    /// # Arguments
+    ///
+    /// * `limit` - The new soft heap limit in bytes, or None to just query the current limit
+    ///
+    /// # Returns
+    ///
+    /// The previous soft heap limit
+    pub fn soft_heap_limit(&mut self, limit: Option<i64>) -> i64 {
+        let n = limit.unwrap_or(-1);
+        unsafe { sqlite3_soft_heap_limit64(n) }
     }
 }
 

@@ -1367,3 +1367,98 @@ enum SqliteTransactionState {
     Read,
     Write,
 }
+
+#[sqlx_macros::test]
+async fn test_db_status() -> anyhow::Result<()> {
+    use libsqlite3_sys::{SQLITE_DBSTATUS_CACHE_USED, SQLITE_DBSTATUS_LOOKASIDE_USED};
+    
+    let mut conn = new::<Sqlite>().await?;
+    let mut handle = conn.lock_handle().await?;
+    
+    // Test basic db_status functionality
+    let (current, highest) = handle.db_status(SQLITE_DBSTATUS_CACHE_USED, false)?;
+    assert!(current >= 0, "Current cache usage should be non-negative");
+    // Note: highest can be 0 if no highwater tracking has occurred yet
+    assert!(highest >= 0, "Highest should be non-negative");
+    
+    // Test lookaside status
+    let (current, highest) = handle.db_status(SQLITE_DBSTATUS_LOOKASIDE_USED, false)?;
+    assert!(current >= 0, "Current lookaside usage should be non-negative");
+    assert!(highest >= 0, "Highest should be non-negative");
+    
+    Ok(())
+}
+
+#[sqlx_macros::test]
+async fn test_db_status_with_usage() -> anyhow::Result<()> {
+    use libsqlite3_sys::SQLITE_DBSTATUS_CACHE_USED;
+    
+    let mut conn = new::<Sqlite>().await?;
+    
+    // Create some tables to generate cache usage
+    conn.execute("CREATE TEMPORARY TABLE test_table (id INTEGER, data TEXT)").await?;
+    conn.execute("INSERT INTO test_table VALUES (1, 'test')").await?;
+    
+    let mut handle = conn.lock_handle().await?;
+    let (current, highest) = handle.db_status(SQLITE_DBSTATUS_CACHE_USED, false)?;
+    
+    assert!(current >= 0, "Current should be non-negative");
+    assert!(highest >= 0, "Highest should be non-negative");
+    
+    Ok(())
+}
+
+#[sqlx_macros::test]
+async fn test_db_status_reset_functionality() -> anyhow::Result<()> {
+    use libsqlite3_sys::SQLITE_DBSTATUS_CACHE_USED;
+    
+    let mut conn = new::<Sqlite>().await?;
+    
+    // Generate some cache usage
+    conn.execute("CREATE TEMPORARY TABLE test_table (id INTEGER)").await?;
+    conn.execute("INSERT INTO test_table VALUES (1)").await?;
+    
+    let mut handle = conn.lock_handle().await?;
+    
+    // Get status without reset
+    let (_current1, _highest1) = handle.db_status(SQLITE_DBSTATUS_CACHE_USED, false)?;
+    
+    // Get status with reset - this should reset the highwater mark
+    let (current2, highest2) = handle.db_status(SQLITE_DBSTATUS_CACHE_USED, true)?;
+    
+    // After reset, the function should succeed (we can't guarantee specific values)
+    assert!(current2 >= 0, "Current should be non-negative");
+    assert!(highest2 >= 0, "Highest should be non-negative");
+    
+    Ok(())
+}
+
+#[sqlx_macros::test]
+async fn test_memory_functions_on_fresh_connection() -> anyhow::Result<()> {
+    let mut conn = new::<Sqlite>().await?;
+    let mut handle = conn.lock_handle().await?;
+    
+    // Test memory usage functions
+    let used = handle.memory_used();
+    let highest = handle.memory_highwater(false);
+    
+    assert!(used >= 0, "Memory used should be non-negative");
+    assert!(highest >= 0, "Memory highest should be non-negative");
+    
+    // Test soft heap limit
+    let original_limit = handle.soft_heap_limit(None);
+    
+    // Set a new limit
+    let new_limit = 1024 * 1024; // 1MB
+    let previous_limit = handle.soft_heap_limit(Some(new_limit));
+    assert_eq!(previous_limit, original_limit, "Should return the previous limit");
+    
+    // Query the current limit
+    let current_limit = handle.soft_heap_limit(None);
+    assert_eq!(current_limit, new_limit, "Should return the newly set limit");
+    
+    // Reset to original limit
+    handle.soft_heap_limit(Some(original_limit));
+    
+    Ok(())
+}
