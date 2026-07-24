@@ -17,7 +17,15 @@ impl MySqlConnection {
 
         let handshake = match &options.socket {
             Some(path) => crate::net::connect_uds(path, do_handshake).await?,
-            None => crate::net::connect_tcp(&options.host, options.port, do_handshake).await?,
+            None => {
+                crate::net::connect_tcp_with_keepalive(
+                    &options.host,
+                    options.port,
+                    do_handshake,
+                    options.tcp_keepalive.as_ref(),
+                )
+                .await?
+            }
         };
 
         let stream = handshake?;

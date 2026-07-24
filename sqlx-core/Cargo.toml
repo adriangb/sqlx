@@ -100,6 +100,7 @@ url = { version = "2.2.2" }
 bstr = { version = "1.0.1", default-features = false, features = ["std"], optional = true }
 hashlink = "0.11.0"
 indexmap = "2.0"
+socket2 = { version = "0.6", features = ["all"] }
 event-listener = "5.2.0"
 hashbrown = "0.16.0"
 

@@ -4,6 +4,7 @@ use sqlx_core::percent_encoding::{percent_decode_str, utf8_percent_encode, NON_A
 use sqlx_core::Url;
 use std::net::IpAddr;
 use std::str::FromStr;
+use std::time::Duration;
 
 impl PgConnectOptions {
     pub(crate) fn parse_from_url(url: &Url) -> Result<Self, Error> {
@@ -104,6 +105,40 @@ impl PgConnectOptions {
                     }
                 }
 
+                // libpq-compatible keepalive parameters.
+                "keepalives" => {
+                    options.tcp_keepalive = match &*value {
+                        "0" => None,
+                        _ => Some(options.tcp_keepalive.unwrap_or_default()),
+                    };
+                }
+
+                "keepalives_idle" => {
+                    let idle = Duration::from_secs(value.parse().map_err(Error::config)?);
+                    options.tcp_keepalive =
+                        Some(options.tcp_keepalive.unwrap_or_default().with_idle(idle));
+                }
+
+                "keepalives_interval" => {
+                    let interval = Duration::from_secs(value.parse().map_err(Error::config)?);
+                    options.tcp_keepalive = Some(
+                        options
+                            .tcp_keepalive
+                            .unwrap_or_default()
+                            .with_interval(interval),
+                    );
+                }
+
+                "keepalives_count" => {
+                    let retries = value.parse().map_err(Error::config)?;
+                    options.tcp_keepalive = Some(
+                        options
+                            .tcp_keepalive
+                            .unwrap_or_default()
+                            .with_retries(retries),
+                    );
+                }
+
                 _ => tracing::warn!(%key, %value, "ignoring unrecognized connect parameter"),
             }
         }
@@ -186,6 +221,33 @@ fn it_parses_socket_correctly_from_parameter() {
     let opts = PgConnectOptions::from_str(url).unwrap();
 
     assert_eq!(Some("/var/run/postgres/".into()), opts.socket);
+}
+
+#[test]
+fn it_parses_libpq_keepalive_parameters() {
+    let url =
+        "postgres://user@localhost/db?keepalives_idle=30&keepalives_interval=10&keepalives_count=3";
+    let opts = PgConnectOptions::from_str(url).unwrap();
+    let keepalive = opts.tcp_keepalive.expect("keepalive should be enabled");
+
+    assert_eq!(keepalive.idle, Some(Duration::from_secs(30)));
+    assert_eq!(keepalive.interval, Some(Duration::from_secs(10)));
+    assert_eq!(keepalive.retries, Some(3));
+}
+
+#[test]
+fn keepalive_is_off_unless_asked_for() {
+    let opts = PgConnectOptions::from_str("postgres://user@localhost/db").unwrap();
+    assert_eq!(opts.tcp_keepalive, None);
+
+    let opts = PgConnectOptions::from_str("postgres://user@localhost/db?keepalives=1").unwrap();
+    assert_eq!(opts.tcp_keepalive, Some(Default::default()));
+
+    // `keepalives=0` disables it again, even after another parameter turned it on.
+    let opts =
+        PgConnectOptions::from_str("postgres://user@localhost/db?keepalives_idle=30&keepalives=0")
+            .unwrap();
+    assert_eq!(opts.tcp_keepalive, None);
 }
 
 #[test]

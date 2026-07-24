@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 pub use ssl_mode::PgSslMode;
 
+use crate::net::TcpKeepalive;
 use crate::{connection::LogSettings, net::tls::CertificateInput};
 
 mod connect;
@@ -30,6 +31,7 @@ pub struct PgConnectOptions {
     pub(crate) log_settings: LogSettings,
     pub(crate) extra_float_digits: Option<Cow<'static, str>>,
     pub(crate) options: Option<String>,
+    pub(crate) tcp_keepalive: Option<TcpKeepalive>,
 }
 
 impl Default for PgConnectOptions {
@@ -95,6 +97,7 @@ impl PgConnectOptions {
             statement_cache_capacity: 100,
             application_name: var("PGAPPNAME").ok(),
             extra_float_digits: Some("2".into()),
+            tcp_keepalive: None,
             log_settings: Default::default(),
             options: var("PGOPTIONS").ok(),
         }
@@ -418,6 +421,35 @@ impl PgConnectOptions {
     /// ```
     pub fn extra_float_digits(mut self, extra_float_digits: impl Into<Option<i8>>) -> Self {
         self.extra_float_digits = extra_float_digits.into().map(|it| it.to_string().into());
+        self
+    }
+
+    /// Configure TCP keepalive on the connection's socket.
+    ///
+    /// Disabled by default, matching the socket default. Enable it when connections
+    /// are long-lived and the server may disappear without closing the socket (a
+    /// failover, a killed container, a dropped NAT mapping): without keepalive, a
+    /// connection blocked reading a response that will never arrive waits forever.
+    ///
+    /// The equivalent libpq parameters (`keepalives`, `keepalives_idle`,
+    /// `keepalives_interval`, `keepalives_count`) are also accepted in the
+    /// connection URL.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use std::time::Duration;
+    /// # use sqlx_core::net::TcpKeepalive;
+    /// # use sqlx_postgres::PgConnectOptions;
+    /// let options = PgConnectOptions::new().tcp_keepalive(
+    ///     TcpKeepalive::new()
+    ///         .with_idle(Duration::from_secs(30))
+    ///         .with_interval(Duration::from_secs(10))
+    ///         .with_retries(3),
+    /// );
+    /// ```
+    pub fn tcp_keepalive(mut self, keepalive: TcpKeepalive) -> Self {
+        self.tcp_keepalive = Some(keepalive);
         self
     }
 

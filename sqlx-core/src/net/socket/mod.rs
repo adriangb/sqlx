@@ -7,10 +7,12 @@ use std::task::{ready, Context, Poll};
 pub use buffered::{BufferedSocket, WriteBuffer};
 use bytes::BufMut;
 use cfg_if::cfg_if;
+pub use tcp_keepalive::TcpKeepalive;
 
 use crate::io::ReadBuf;
 
 mod buffered;
+mod tcp_keepalive;
 
 pub trait Socket: Send + Sync + Unpin + 'static {
     fn try_read(&mut self, buf: &mut dyn ReadBuf) -> io::Result<usize>;
@@ -186,20 +188,64 @@ pub async fn connect_tcp<Ws: WithSocket>(
     port: u16,
     with_socket: Ws,
 ) -> crate::Result<Ws::Output> {
+    connect_tcp_with_keepalive(host, port, with_socket, None).await
+}
+
+/// Open a TCP socket to `host` and `port`, optionally configuring TCP keepalive on it.
+///
+/// Without keepalive, a connection whose server disappeared without closing the socket
+/// (a failover, a killed container, a dropped NAT mapping) is only discovered the next
+/// time the client writes to it. A connection blocked reading a response waits forever.
+pub async fn connect_tcp_with_keepalive<Ws: WithSocket>(
+    host: &str,
+    port: u16,
+    with_socket: Ws,
+    keepalive: Option<&TcpKeepalive>,
+) -> crate::Result<Ws::Output> {
     #[cfg(feature = "_rt-tokio")]
     if crate::rt::rt_tokio::available() {
-        return Ok(with_socket
-            .with_socket(tokio::net::TcpStream::connect((host, port)).await?)
-            .await);
+        let stream = tokio::net::TcpStream::connect((host, port)).await?;
+        set_tcp_keepalive(&stream, keepalive)?;
+
+        return Ok(with_socket.with_socket(stream).await);
     }
 
     cfg_if! {
         if #[cfg(feature = "_rt-async-io")] {
-            Ok(with_socket.with_socket(connect_tcp_async_io(host, port).await?).await)
+            // Keepalive is applied inside, on the concrete socket type.
+            Ok(with_socket.with_socket(connect_tcp_async_io(host, port, keepalive).await?).await)
         } else {
-            crate::rt::missing_rt((host, port, with_socket))
+            crate::rt::missing_rt((host, port, with_socket, keepalive))
         }
     }
+}
+
+#[cfg(all(unix, any(feature = "_rt-tokio", feature = "_rt-async-io")))]
+fn set_tcp_keepalive<S: std::os::fd::AsFd>(
+    stream: &S,
+    keepalive: Option<&TcpKeepalive>,
+) -> crate::Result<()> {
+    let Some(keepalive) = keepalive else {
+        return Ok(());
+    };
+
+    socket2::SockRef::from(stream).set_tcp_keepalive(&keepalive.to_socket2())?;
+
+    Ok(())
+}
+
+#[cfg(all(windows, any(feature = "_rt-tokio", feature = "_rt-async-io")))]
+fn set_tcp_keepalive<S: std::os::windows::io::AsSocket>(
+    stream: &S,
+    keepalive: Option<&TcpKeepalive>,
+) -> crate::Result<()> {
+    let Some(keepalive) = keepalive else {
+        return Ok(());
+    };
+
+    socket2::SockRef::from(stream).set_tcp_keepalive(&keepalive.to_socket2())?;
+
+    Ok(())
 }
 
 /// Open a TCP socket to `host` and `port`.
@@ -208,7 +254,11 @@ pub async fn connect_tcp<Ws: WithSocket>(
 ///
 /// This implements the same behavior as [`tokio::net::TcpStream::connect()`].
 #[cfg(feature = "_rt-async-io")]
-async fn connect_tcp_async_io(host: &str, port: u16) -> crate::Result<impl Socket> {
+async fn connect_tcp_async_io(
+    host: &str,
+    port: u16,
+    keepalive: Option<&TcpKeepalive>,
+) -> crate::Result<impl Socket> {
     use async_io::Async;
     use std::net::{IpAddr, TcpStream, ToSocketAddrs};
 
@@ -216,7 +266,10 @@ async fn connect_tcp_async_io(host: &str, port: u16) -> crate::Result<impl Socke
     let host = host.trim_matches(&['[', ']'][..]);
 
     if let Ok(addr) = host.parse::<IpAddr>() {
-        return Ok(Async::<TcpStream>::connect((addr, port)).await?);
+        let stream = Async::<TcpStream>::connect((addr, port)).await?;
+        set_tcp_keepalive(&stream, keepalive)?;
+
+        return Ok(stream);
     }
 
     let host = host.to_string();
@@ -232,7 +285,11 @@ async fn connect_tcp_async_io(host: &str, port: u16) -> crate::Result<impl Socke
     // Loop through all the Socket Addresses that the hostname resolves to
     for socket_addr in addresses {
         match Async::<TcpStream>::connect(socket_addr).await {
-            Ok(stream) => return Ok(stream),
+            Ok(stream) => {
+                set_tcp_keepalive(&stream, keepalive)?;
+
+                return Ok(stream);
+            }
             Err(e) => last_err = Some(e),
         }
     }
