@@ -281,23 +281,38 @@ impl<DB: Database> Floating<DB, Live<DB>> {
     async fn return_to_pool(mut self) -> bool {
         // Immediately close the connection.
         if self.guard.pool.is_closed() {
-            self.close().await;
+            self.close_bounded().await;
             return false;
         }
 
         // If the connection is beyond max lifetime, close the connection and
         // immediately create a new connection
         if is_beyond_max_lifetime(&self.inner, &self.guard.pool.options) {
-            self.close().await;
+            self.close_bounded().await;
             return false;
         }
 
         if let Some(test) = &self.guard.pool.options.after_release {
             let meta = self.metadata();
-            match (test)(&mut self.inner.raw, meta).await {
+            let result = crate::rt::timeout(
+                RETURN_TO_POOL_PING_TIMEOUT,
+                (test)(&mut self.inner.raw, meta),
+            )
+            .await;
+
+            let test_result = match result {
+                Ok(test_result) => test_result,
+                Err(_) => {
+                    tracing::warn!("timed out in `after_release`; discarding the connection");
+                    self.close_hard().await;
+                    return false;
+                }
+            };
+
+            match test_result {
                 Ok(true) => (),
                 Ok(false) => {
-                    self.close().await;
+                    self.close_bounded().await;
                     return false;
                 }
                 Err(error) => {
@@ -357,6 +372,14 @@ impl<DB: Database> Floating<DB, Live<DB>> {
         let _ = self.inner.raw.close().await;
 
         // `guard` is dropped as intended
+    }
+
+    /// Close the connection, giving up on the graceful close if it does not complete
+    /// promptly. `close()` writes `Terminate` and waits for the peer to drop the
+    /// connection, which a silent peer never does, and the pool permit is held for the
+    /// whole wait. Cancelling it still drops the connection and releases the permit.
+    async fn close_bounded(self) {
+        let _ = crate::rt::timeout(RETURN_TO_POOL_PING_TIMEOUT, self.close()).await;
     }
 
     pub async fn close_hard(self) {
